@@ -4,6 +4,7 @@
     "module": "NodeNext",                        /* Specify module code generation */
     "moduleResolution": "NodeNext",              /* Determine how modules get resolved */
     "lib": ["ES2022"],                           /* Specify library files to be included */
+    "types": ["node"],
     "outDir": "./dist",                          /* Redirect output structure to the directory */
     "rootDir": "./src",                          /* Specify the root directory of input files */
     

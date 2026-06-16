@@ -1,4 +1,3 @@
-version: '3.8'
 
 services:
   postgres:
@@ -13,6 +12,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U notify_admin -d notification_engine"]
       interval: 5s
@@ -32,6 +32,30 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    
+  api-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: notification_api_core
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=notify_admin
+      - DB_PASSWORD=notify_secure_password123
+      - DB_NAME=notification_engine
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   pgdata:
