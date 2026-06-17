@@ -4,7 +4,7 @@ import { dbPool } from '../../../../shared/infrastructure/database.js';
 export class PostgresNotificationRepository implements INotificationRepository {
     async createLog(log: CreateLogDto): Promise<string> {
         const query = `
-            INSERT INTO notificatio_logs (tenant_id, channel, recipient, status, error_message, created_at, updated_at)
+            INSERT INTO notification_logs (tenant_id, channel, recipient, status, error_message, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, Now(), Now())
             RETURNING id;
         `;

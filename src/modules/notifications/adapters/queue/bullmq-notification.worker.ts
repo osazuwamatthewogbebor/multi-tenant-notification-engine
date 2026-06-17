@@ -45,6 +45,7 @@ export class BullMQNotificationWorker {
                 connection: {
                     host: redisHost,
                     port: redisPort,
+                    maxRetriesPerRequest: null
                 },
                 concurrency: 10,
             }
@@ -54,9 +55,7 @@ export class BullMQNotificationWorker {
     }
 
     private setupListeners(): void {
-        this.worker.on('failed', (job, err) => {
-            console.error(`[Worker Error] Job ${job?.id} permanently failed or stalled" ${err.message}`);
-            
-        })
-    }
-}
+        this.worker.on('completed', (job) => console.log(`[Worker] Job ${job.id} dispatched successfully.`));
+        this.worker.on('failed', (job, err) => console.error(`[Worker Error] Job ${job?.id} permanently failed or stalled" ${err.message}`));
+    };
+};

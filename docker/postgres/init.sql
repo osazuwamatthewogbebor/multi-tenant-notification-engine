@@ -15,7 +15,7 @@ VALUES ('00000000-0000-0000-0000-000000000001', 'Enterprise Mock Client', 'GOLD'
 ON CONFLICT DO NOTHING;
 
 -- 2. Create our core immutable Notification Logs trace vault
-CREATE TABLE IF NOT EXIST notidication_logs (
+CREATE TABLE IF NOT EXISTS notification_logs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id VARCHAR(255) NOT NULL,
     channel VARCHAR(50) NOT NULL,

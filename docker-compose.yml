@@ -51,6 +51,7 @@ services:
       - DB_PASSWORD=notify_secure_password123
       - DB_NAME=notification_engine
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - DATABASE_URL=postgresql://notify_admin:notify_secure_password123@postgres:5432/notification_engine
     depends_on:
       postgres:
         condition: service_healthy

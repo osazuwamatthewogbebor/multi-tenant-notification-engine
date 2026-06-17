@@ -9,7 +9,7 @@ export class BullMQNotificationQueue implements INotificationQueue {
         const redisPort = process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT) : 6379;
 
         // Initialize the BullMQ queue with Redis connection details
-        this.queue = new Queue('notifcation-delivery', {
+        this.queue = new Queue('notification-delivery', {
             connection: {
                 host: redisHost,
                 port: redisPort,

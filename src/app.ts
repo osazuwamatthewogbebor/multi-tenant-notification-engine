@@ -3,6 +3,8 @@ import dotenv from 'dotenv';
 import { BullMQNotificationQueue } from './modules/notifications/adapters/queue/bullmq-notification.queue.js';
 import { BullMQNotificationWorker } from './modules/notifications/adapters/queue/bullmq-notification.worker.js';
 import { NotificationController } from './modules/notifications/adapters/controllers/notification.controller.js';
+import { validateTenant } from './modules/notifications/adapters/middlewares/tenant.middleware.js';
+
 
 dotenv.config();
 
@@ -22,7 +24,7 @@ console.log('[System] Background BullMQ worker initialized successfully.');
 
 
 // 2. Define Routing Infrastructure
-app.post('/api/v1/notifications/send', (req, res) => notificationController.handleSend(req, res));
+app.post('/api/v1/notifications/send', validateTenant, (req, res) => notificationController.handleSend(req, res));
 
 // Health check
 app.get('/health', (_req, res) => {
