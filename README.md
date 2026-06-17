@@ -1,3 +1,5 @@
+[![Docker Pulls](https://img.shields.io/docker/pulls/osasmatthew/multi-tenant-notification-engine?style=for-the-badge&logo=docker)](https://hub.docker.com/r/osasmatthew/multi-tenant-notification-engine)
+
 # Multi-Tenant Asynchronous Notification Engine
 
 An enterprise-grade, high-throughput notification ingestion and delivery system built using a decoupled **Hexagonal (Ports & Adapters) Architecture**. The system leverages asynchronous message queuing to decouple fast HTTP ingestion layers from slow external I/O operations (Slack, Telegram, SMTP), guaranteeing sub-millisecond client response times, data isolation across tenants, and resilient fault tolerance.
@@ -13,8 +15,6 @@ An enterprise-grade, high-throughput notification ingestion and delivery system 
 * **Resilient Failure Boundaries:** Configured with an enterprise-grade exponential backoff strategy ($2\text{s} \times 2^{\text{attempt}}$) and automatic distributed lock recovery to protect against transient network faults.
 
 ---
-
-## 📌 Table of Contents
 
 ## 📌 Table of Contents
 * [System Topology & Workflow Architecture](#-system-topology--workflow-architecture)
@@ -86,6 +86,75 @@ The codebase cleanly separates structural business logic from external delivery 
       └───────────┘   └───────────┘   └───────────┘
 
 ```
+![System Topology Architecture](./assets/architecture.png)
+```mermaid
+sequenceDiagram
+    autonumber
+    Client->>Express API: POST /api/v1/notifications/send (with x-tenant-id)
+    Express API->>Redis: Query Cache-Aside Tenant Status
+    Note over Redis, Postgres: If Cache Miss, verify via Postgres & cache result
+    Express API->>Zod: Validate Payload Structure
+    Express API->>BullMQ Queue: Enqueue Job Data
+    BullMQ Queue-->>Client: 202 Accepted (Connection Released)
+    
+    loop Worker Polling
+        BullMQ Worker->>BullMQ Queue: Pull Active Job (Atomic Lua Lock)
+        BullMQ Worker->>Postgres: Create Log (Status: PROCESSING)
+        BullMQ Worker->>Strategy Context: Route to Channel (Slack/Telegram)
+        Strategy Context->>Third Party API: Deliver Outbound Network Request
+        Alt Success
+            BullMQ Worker->>Postgres: Update Log (Status: DELIVERED)
+        Else Network Failure
+            BullMQ Worker->>Postgres: Update Log (Status: FAILED) + Trigger Exponential Backoff
+        End
+    end
+
+```mermaid
+graph TD
+    %% Styling Definitions
+    classDef client fill:#eceff1,stroke:#37474f,stroke-width:2px;
+    classDef layer fill:#e1f5fe,stroke:#0288d1,stroke-width:2px;
+    classDef storage fill:#efebe9,stroke:#5d4037,stroke-width:2px;
+    classDef external fill:#f1f8e9,stroke:#558b2f,stroke-width:2px;
+
+    %% Nodes
+    Inbound["Inbound Traffic (HTTP POST)"]:::client
+    Middleware["Tenant Verification Middleware<br/>(Cache-Aside Guardrail)"]:::layer
+    Controller["Notification Controller<br/>(Zod Schema Parsing)"]:::layer
+    Queue["BullMQ Ingestion Queue<br/>(Producer Port)"]:::layer
+    
+    RedisCache[("Redis Cache<br/>(Tenant Status Status)")]:::storage
+    PostgresDB[("PostgreSQL Database<br/>(Registry & Trace Logs)")]:::storage
+    RedisQueue[("Redis Memory Buffer<br/>(BullMQ Job Store)")]:::storage
+
+    Worker["BullMQ Background Worker<br/>(Consumer Port)"]:::layer
+    Strategy["Strategy Context Routing Engine"]:::layer
+    
+    Slack["Slack Webhook Gateway"]:::external
+    Telegram["Telegram Bot API"]:::external
+    Email["SMTP Server (Planned)"]:::external
+
+    %% Connections
+    Inbound --> Middleware
+    Middleware -- "1. Fast Look-up" --> RedisCache
+    Middleware -- "2. DB Fallback / Miss" --> PostgresDB
+    Middleware -->|"Passed Valid UUID"| Controller
+    Controller --> Queue
+    Queue -->|"Atomically Enqueue Job"| RedisQueue
+    
+    RedisQueue -.->|"Async Worker Poll"| Worker
+    Worker -->|"Write State PROCESSING"| PostgresDB
+    Worker --> Strategy
+    Strategy --> Slack
+    Strategy --> Telegram
+    Strategy --> Email
+
+    %% Apply Classes
+    class Inbound client;
+    class Middleware,Controller,Queue,Worker,Strategy layer;
+    class RedisCache,PostgresDB,RedisQueue storage;
+    class Slack,Telegram,Email external;
+
 
 ### End-to-End Execution Trace
 
