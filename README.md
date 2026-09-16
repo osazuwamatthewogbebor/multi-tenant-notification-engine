@@ -1,218 +1,145 @@
-[![Docker Pulls](https://img.shields.io/docker/pulls/osasmatthew/multi-tenant-notification-engine?style=for-the-badge&logo=docker)](https://hub.docker.com/r/osasmatthew/multi-tenant-notification-engine)
+# Multi-Tenant Notification Engine
 
-# Multi-Tenant Asynchronous Notification Engine
+A notification service that accepts requests over HTTP and delivers them to
+Slack, Telegram, or email in the background. The API doesn't wait for those
+third-party services to respond — it validates the request, pushes it onto a
+queue, and returns immediately.
 
-An enterprise-grade, high-throughput notification ingestion and delivery system built using a decoupled **Hexagonal (Ports & Adapters) Architecture**. The system leverages asynchronous message queuing to decouple fast HTTP ingestion layers from slow external I/O operations (Slack, Telegram, SMTP), guaranteeing sub-millisecond client response times, data isolation across tenants, and resilient fault tolerance.
+Built with TypeScript, Express, Redis (BullMQ), and PostgreSQL, running in
+Docker.
 
----
+## Why it's built this way
 
-## 🏁 Architectural Highlights & Core Capabilities
+The main problem this solves: sending a Slack or Telegram message means
+making a network call to someone else's API, and those calls can be slow or
+fail entirely. If the HTTP handler waits for them, then a slow Slack means a
+slow API for every caller, and a Slack outage means requests piling up until
+the process runs out of memory.
 
-* **Asynchronous Processing Pipeline:** Implements a strict producer-consumer split via distributed queues, keeping the API ingest loop non-blocking.
-* **Data Isolation Matrix:** Strict multi-tenant security verification at the boundary using a high-performance **Cache-Aside validation design pattern**.
-* **Structural Type Safety:** Ingestion telemetry validated via runtime schema reflections (Zod) mapped to type-safe domain models.
-* **Polymorphic Provider Routing:** Decoupled platform dispatch engines implemented using an extensible **Strategy Pattern**.
-* **Resilient Failure Boundaries:** Configured with an enterprise-grade exponential backoff strategy ($2\text{s} \times 2^{\text{attempt}}$) and automatic distributed lock recovery to protect against transient network faults.
+So ingestion and delivery are split. The API's job is to check the request is
+valid and get it onto the queue. A separate worker process pulls jobs off the
+queue and does the actual sending, with retries. Callers get a `202 Accepted`
+and a message ID they can use to check delivery status later.
 
----
-
-## 📌 Table of Contents
-* [System Topology & Workflow Architecture](#-system-topology--workflow-architecture)
-* [Core Engineering Features](#-core-engineering-features)
-* [Supported Delivery Channels](#-supported-delivery-channels)
-* [Infrastructure Stack & Tech Icons](#-infrastructure-stack--tech-icons)
-* [Engineering Trade-Offs & Strategic Decisions](#-engineering-trade-offs--strategic-decisions)
-* [Environment Configurations (.env)](#-environment-configurations-env)
-* [Step-by-Step Deployment Guide](#-step-by-step-deployment-guide)
-* [Integration Testing Suites](#-integration-testing-suites)
-* [Future System Roadmap](#-future-system-roadmap)
-* [Author & Contribution Profile](#-author--contribution-profile)
-* [License](#-license)
-
----
-
-## 📐 System Topology & Workflow Architecture
-
-The codebase cleanly separates structural business logic from external delivery mechanisms, frameworks, and infrastructure drivers.
-
-```text
-       INBOUND TRAFFIC (HTTP)
-                 │
-                 ▼
-    ┌─────────────────────────┐
-    │    Express API Host     │
-    └────────────┬────────────┘
-                 │
-                 ▼
-    ┌─────────────────────────┐
-    │ Tenant Verification     ├─────── [ Cache Hit (<1ms) ] ──────► [ Redis Cache ]
-    │ Middleware Guardrail    ├─────── [ Cache Miss ] ────────────► [ PostgreSQL ]
-    └────────────┬────────────┘                                           │
-                 │ (Passed Valid UUID)                                    │
-                 ▼                                                        ▼
-    ┌─────────────────────────┐                                    [ Populate Cache ]
-    │ NotificationController  │
-    └────────────┬────────────┘
-                 │ (Zod Payload Parsing)
-                 ▼
-    ┌─────────────────────────┐
-    │ BullMQNotificationQueue │  [ Ingestion Port ]
-    └────────────┬────────────┘
-                 │
-                 ▼
-         ┌───────────────┐
-         │  Redis Queue  │  ◄─── Distributed Data State Store
-         └───────┬───────┘
-                 │
-           (Async Poll)
-                 │
-                 ▼
-    ┌─────────────────────────┐
-    │ BullMQNotificationWorker│  [ Consumption Port ]
-    └────────────┬────────────┘
-                 │
-      ┌──────────┴──────────┐
-      ▼                     ▼
-┌───────────┐         ┌───────────┐
-│ Postgres  │         │ Strategy  │
-│ Trace Log │         │ Context   │
-└───────────┘         └─────┬─────┘
-                            │
-            ┌───────────────┼───────────────┐
-            ▼               ▼               ▼
-      ┌───────────┐   ┌───────────┐   ┌───────────┐
-      │   Slack   │   │ Telegram  │   │   Email   │
-      │ Strategy  │   │ Strategy  │   │ Strategy  │
-      └───────────┘   └───────────┘   └───────────┘
+## How a request flows through
 
 ```
-![System Topology Architecture](./assets/architecture.png)
+HTTP POST
+   │
+   ▼
+Express API
+   │
+   ▼
+validateTenant middleware ──► Redis (cache hit)
+   │                      └─► PostgreSQL (cache miss, then populate cache)
+   ▼
+NotificationController  (Zod validation of the body)
+   │
+   ▼
+BullMQ queue (Redis)
+   │
+   │  ... async ...
+   ▼
+Worker process
+   │
+   ├──► PostgreSQL  (write log row: PROCESSING → DELIVERED / FAILED)
+   │
+   └──► Channel strategy ──► Slack / Telegram / Email
+```
 
+1. **Tenant check.** The `x-tenant-id` header is looked up in Redis first. On
+   a miss, it checks PostgreSQL and caches the result for an hour. Unknown
+   tenants are rejected here, before anything else runs.
+2. **Body validation.** The request body is parsed with a Zod schema, so
+   malformed payloads fail at the edge rather than inside the worker.
+3. **Enqueue.** The validated job goes onto a BullMQ queue backed by Redis.
+   The HTTP response returns at this point with `202 Accepted`.
+4. **Worker picks it up.** BullMQ uses Redis Lua scripts to hand each job to
+   exactly one worker, so a job isn't delivered twice if multiple workers are
+   running.
+5. **Log then send.** The worker writes a `PROCESSING` row to PostgreSQL,
+   resolves which channel strategy to use, and makes the outbound call.
+6. **Settle.** On success the row becomes `DELIVERED`. On failure it becomes
+   `FAILED` with the error recorded, and BullMQ schedules a retry with
+   exponential backoff (`2s × 2^attempt`).
 
-### End-to-End Execution Trace
+## Channels
 
-1. **Perimeter Defense:** The incoming request is intercepted by the `validateTenant` middleware. The engine queries the local **Redis** instance first. On a cache miss, it validates structural authenticity against the **PostgreSQL** Registry Table, gracefully caching valid schemas with an explicit 1-hour Time-To-Live (TTL).
-2. **Structural Validation:** The request body hits the application domain controller where it undergoes runtime type-parsing via a comprehensive Zod validator schema.
-3. **Decoupled Ingestion:** Validated entities are marshaled into the asynchronous buffer pipeline. The adapter issues a fast command to Redis over TCP port `6379`. The HTTP controller immediately releases the caller connection with a `202 Accepted` status code.
-4. **Queue Processing:** Running on isolated execution loops, background consumer threads pull job data atomically using distributed Redis Lua lock scripts to prevent duplicate delivery tasks.
-5. **State Tracking:** The worker writes an initial `PROCESSING` log row entry into PostgreSQL.
-6. **Strategy Dispatch:** The engine resolves the context strategy matching the requested message channel (`SLACK`, `TELEGRAM`) and sends the network request to the third-party gateway API.
-7. **Final Settlement:** If successful, the database trace log transitions to `DELIVERED`. If it fails, the worker logs `FAILED` along with the network exception stack trace, triggering automatic exponential retry schedules.
+| Channel  | How it's sent    | Status  |
+|----------|------------------|---------|
+| Slack    | Incoming webhook | Working |
+| Telegram | Bot API          | Working |
+| Email    | SMTP             | Planned |
 
----
+Each channel is a separate strategy class behind a shared interface. Adding
+Discord or Twilio means writing one new class and registering it — the queue,
+worker, and logging code don't change.
 
-## 🏁 Core Engineering Features
+## Decisions I made, and what they cost
 
-* **Asynchronous Execution Model:** Distributed worker pools handle heavy third-party networking tasks independent of the user-facing web server.
-* **Granular Multi-Tenancy:** Secure tenant separation layer ensures no client data can bleed into neighboring logs or operations.
-* **Extensible Architecture:** Adding a new communication platform (e.g., Discord or Twilio SMS) requires writing a single subclass strategy without changing the core engine.
-* **Fault-Tolerant Retries:** Built-in resilience backing loops execute custom exponential fallback timers ($2\text{s} \times 2^{\text{attempt}}$) to handle temporary downstream network breaks cleanly.
+**BullMQ over RabbitMQ.** RabbitMQ has much richer routing than I'm using
+here, but it's a separate service to run and operate. Redis was already in
+the stack for the tenant cache, and BullMQ handles job state atomically
+through Lua scripts inside Redis. For this workload that was enough, and it
+kept the deployment to three containers instead of four. The cost: if I later
+needed fan-out to multiple consumers or topic-based routing, BullMQ would
+start fighting me and RabbitMQ would be the better tool.
 
----
+**202 Accepted instead of waiting for delivery.** Callers don't find out from
+the HTTP response whether their message actually reached Slack — they get a
+message ID and have to check the log. That's a real downside for anyone who
+wants immediate confirmation. I took it because the alternative is the API's
+availability being tied to Slack's and Telegram's, which seemed worse.
 
-## 📡 Supported Delivery Channels
+**No foreign key from `notification_logs.tenant_id` to the tenants table.**
+The log table is written to constantly by the worker, and I didn't want every
+insert taking a lock against the tenants table. Tenant validity is already
+enforced at the API boundary. The tradeoff is honest: the database itself
+won't stop a bad `tenant_id` from being written, so this only holds as long
+as the middleware is the sole write path. If something else ever writes to
+that table directly, this becomes a bug.
 
-| Channel | Protocol | Security Mechanism | Status | Target Use Case |
-| --- | --- | --- | --- | --- |
-| **Slack Webhooks** | HTTPS POST | Cryptographic Tokens | `ONLINE` | Corporate alerts & DevOps pipeline events |
-| **Telegram Bot API** | HTTPS JSON | Bot Authentication Tokens | `ONLINE` | Consumer messaging & real-time chat updates |
-| **SMTP / Email** | TLS Mail | OAuth2 / Secure Passwords | `PLANNED` | Traditional transaction confirmations & invoices |
+## Running it
 
----
+Needs Docker and Docker Compose.
 
-## 🛠️ Infrastructure Stack Matrix
+```bash
+# Fresh start, including wiping volumes
+docker compose down -v
+docker compose up --build
+```
 
-* **Runtime Runtime Engine:** Node.js (v20+ LTS) with TypeScript (`tsx` compiler output).
-* **Web Framework Node:** Express.js (Clean, framework-agnostic architectural mapping).
-* **Queue Orchestration Layer:** BullMQ (Distributed memory management client).
-* **Persistence & Metric Logging Store:** PostgreSQL 15 (Relational storage, strict schema index execution constraints).
-* **Asynchronous Broker Core:** Redis 7 (In-memory structured storage engine).
-* **Container Runtime Layer:** Docker & Docker Compose.
+You should see Redis and Postgres report healthy, then:
 
----
+```
+[System] Background BullMQ worker initialized successfully.
+[System] Multi-Tenant Notification Core running on port 3000
+```
 
-## ⚖️ Engineering Trade-Offs & Strategic Decisions
+### Environment variables
 
-### 1. Architectural Style: Node.js/BullMQ Library vs. Dedicated RabbitMQ Broker
-
-* **Decision:** We chose an application-level library wrapper (BullMQ) running over Redis rather than installing a standalone message broker like RabbitMQ.
-* **Trade-off Analysis:** While RabbitMQ delivers highly complex native message routing rules out of the box, it requires maintaining a distinct, resource-heavy Erlang environment. BullMQ handles delivery states cleanly through atomic Lua operations directly inside Redis. Since Redis was already chosen for our low-latency caching layers, this decision eliminated infrastructure bloat, kept the deployment lightweight, and leveraged sub-millisecond in-memory data processing operations.
-
-### 2. Transaction Flow: Fast Ingestion over Direct Real-Time Deliveries
-
-* **Decision:** The platform trades instant visibility into external message dispatch statuses for unthrottled ingestion availability by responding with a `202 Accepted` status.
-* **Trade-off Analysis:** If the API directly waited for external APIs (like Slack or Telegram) to respond before completing the client's request, execution would lock up under heavy traffic spikes. If third-party networks went down or slowed down, our backend would experience thread pools stalling and out-of-memory crashes. Pushing requests into Redis allows us to isolate our system boundaries from downstream network dependencies. Client verification applications can simply query the database transaction tracking logs asynchronously using the generated message ID.
-
-### 3. Database Strategy: Decoupled Log Tables vs. Foreign Key Constraints
-
-* **Decision:** The `tenant_id` column inside the `notification_logs` table stores the raw tenant tracking identifier directly without enforcing a strict database-level `FOREIGN KEY` reference constraint back to the main `tenants` registration table.
-* **Trade-off Analysis:** This prevents the background logging worker from locking database tables during heavy throughput spikes. We enforce strict data verification upstream at the API gateway layer via our validation middleware, allowing the write-heavy background database logs to write data continuously at scale without query bottlenecks.
-
----
-
-## ⚙️ Environment Variables Config File (`.env`)
-
-Create a `.env` configuration file in your project root directory:
+Create a `.env` in the project root:
 
 ```env
 PORT=3000
 NODE_ENV=development
 
-# Redis Infrastructure Configuration
 REDIS_HOST=notification_redis
 REDIS_PORT=6379
 
-# PostgreSQL Database Configuration
 DB_HOST=notification_postgres
 DB_USER=postgres
 DB_PASSWORD=postgres
 DB_NAME=notifications_db
 DB_PORT=5432
 DATABASE_URL=postgresql://postgres:postgres@notification_postgres:5432/notifications_db
-
 ```
 
----
+## Trying it out
 
-## 🚀 Step-by-Step Production Deployment Guide
+A tenant `00000000-0000-0000-0000-000000000001` is seeded on startup.
 
-### Prerequisites
-
-* Docker & Docker Compose installed on your host machine.
-* A terminal interface client (e.g., `curl`).
-
-### 1. Build and Initialize the Infrastructure
-
-Run the following terminal command to clean the active volume mounts, build the system dependencies, and launch your isolated container cluster:
-
-```bash
-# Tear down stale cache components along with associated volume mappings
-docker compose down -v
-
-# Recompile the TypeScript application codebase and spin up the containers
-docker compose up --build
-
-```
-
-### 2. Verify Your Services are Running
-
-Ensure that all three core services show a healthy status in your container logs:
-
-```text
-Container notification_redis Healthy
-Container notification_postgres Healthy
-[System] Background BullMQ worker initialized successfully.
-[System] Multi-Tenant Notification Core running on port 3000
-
-```
-
----
-
-## 🧪 Integration Testing Guide
-
-### 1. Testing a Valid Tenant Request (Cache-Aside Path)
-
-Send a POST request using the valid, pre-seeded tenant UUID (`00000000-0000-0000-0000-000000000001`):
+**Valid request:**
 
 ```bash
 curl -X POST http://localhost:3000/api/v1/notifications/send \
@@ -220,63 +147,58 @@ curl -X POST http://localhost:3000/api/v1/notifications/send \
   -H "x-tenant-id: 00000000-0000-0000-0000-000000000001" \
   -d '{
     "channel": "SLACK",
-    "recipient": "https://hooks.slack.com/services/YOUR_WORKSPACE/YOUR_CHANNEL/YOUR_SECRET_TOKEN",
-    "content": "*System Alert:* Core notification execution engine successfully operational."
+    "recipient": "https://hooks.slack.com/services/YOUR/WEBHOOK/URL",
+    "content": "Test message from the notification engine."
   }'
-
 ```
 
-#### Expected Terminal Log Output:
-
-```text
-notification_api_core | Enqueued job dispatch:SLACK:00000000-0000-0000-0000-000000000001
-notification_api_core | [Worker] Processing job 1 for Tenant: 00000000-0000-0000-0000-000000000001 via SLACK
+Logs should show the job being queued and then picked up:
 
 ```
+Enqueued job dispatch:SLACK:00000000-0000-0000-0000-000000000001
+[Worker] Processing job 1 for Tenant: 00000000-... via SLACK
+```
 
-### 2. Testing the Boundary Guardrail (Invalid Tenant Path)
-
-Send a request using an unlisted or malformed tenant ID to verify that the security perimeter blocks unauthorized traffic:
+**Unknown tenant** (should be rejected before reaching the queue):
 
 ```bash
 curl -X POST http://localhost:3000/api/v1/notifications/send \
   -H "Content-Type: application/json" \
   -H "x-tenant-id: 99999999-9999-9999-9999-999999999999" \
-  -d '{
-    "channel": "TELEGRAM",
-    "recipient": "123456789",
-    "content": "Malicious payload attempt."
-  }'
-
+  -d '{"channel":"TELEGRAM","recipient":"123456789","content":"test"}'
 ```
-
-#### Expected HTTP Client Response:
 
 ```json
 {
   "status": "fail",
   "message": "Unauthorized access. Provided Tenant ID is not registered."
 }
-
 ```
 
-## 🔮 Future System Roadmap
+## Known gaps
 
-* [ ] **Dynamic Webhook Rate-Limiting:** Build an active throttle array inside the Redis cache mapping window rules per tenant layer to prevent downstream provider bans.
-* [ ] **Dead Letter Queue (DLQ) Traps:** Add a secure secondary routing queue to safely hold and dump jobs that exhaust all 5 backoff retries for deep analysis.
-* [ ] **Infrastructure Evolution:** Rewrite the core high-throughput gateway proxy and load balancer in **Go** to maximize packet-forwarding speeds and optimize memory allocation.
+- **No dead letter queue.** Jobs that exhaust their retries are marked
+  `FAILED` in Postgres but the job itself is gone. There's no way to inspect
+  or replay them.
+- **No rate limiting per tenant.** A single tenant can currently flood the
+  queue, and nothing stops the worker from hammering a provider hard enough
+  to get the webhook banned.
+- **Email isn't implemented** — the strategy interface is there, the SMTP
+  adapter isn't.
+- **No automated tests.** The curl commands above are how I've been checking
+  it, which isn't good enough.
+- **Retry config is global**, not per-channel. Telegram and Slack have
+  different rate limit behaviour and should probably back off differently.
 
----
+## Stack
 
-## 👨‍💻 Author & Contribution Profile
+Node.js 20 · TypeScript · Express · BullMQ · Redis 7 · PostgreSQL 15 · Zod ·
+Docker Compose
 
-**Osazuwa Matthew Ogbebor** *Lead Backend & Systems Software Engineer* * Specialized in high-scale, fault-tolerant distributed runtime architectures, advanced automation pipelines, and robust systems engineering paradigms.
+## Author
 
-* **GitHub:** [@OsazuwaOgbebor](https://github.com/osazuwamatthewogbebor)
-<!-- * 💼 **Upwork:** [Specialized Go & Node.js Engineering Catalog](https://www.google.com/search?q=https://www.upwork.com) -->
+Built by Osazuwa Matthew Ogbebor — [@osazuwamatthewogbebor](https://github.com/osazuwamatthewogbebor)
 
----
+## License
 
-## 📄 License
-
-This software is distributed under the **MIT License**. Check out the `LICENSE` script configuration files for terms regarding open-source contribution setups.
+MIT — see `LICENSE`.
