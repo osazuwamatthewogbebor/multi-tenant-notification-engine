@@ -2,8 +2,19 @@
 
 A notification service that accepts requests over HTTP and delivers them to
 Slack, Telegram, or email in the background. The API doesn't wait for those
-third-party services to respond — it validates the request, pushes it onto a
+third-party services to respond. It validates the request, pushes it onto a
 queue, and returns immediately.
+
+<p>
+  <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white" />
+  <img src="https://img.shields.io/badge/Node.js-339933?style=flat-square&logo=node.js&logoColor=white" />
+  <img src="https://img.shields.io/badge/Express-000000?style=flat-square&logo=express&logoColor=white" />
+  <img src="https://img.shields.io/badge/Redis-DC382D?style=flat-square&logo=redis&logoColor=white" />
+  <img src="https://img.shields.io/badge/BullMQ-CC0000?style=flat-square&logo=redis&logoColor=white" />
+  <img src="https://img.shields.io/badge/PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white" />
+  <img src="https://img.shields.io/badge/Zod-3E67B1?style=flat-square&logo=zod&logoColor=white" />
+  <img src="https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white" />
+</p>
 
 Built with TypeScript, Express, Redis (BullMQ), and PostgreSQL, running in
 Docker.
@@ -72,7 +83,7 @@ Worker process
 | Email    | SMTP             | Planned |
 
 Each channel is a separate strategy class behind a shared interface. Adding
-Discord or Twilio means writing one new class and registering it — the queue,
+Discord or Twilio means writing one new class and registering it. The queue,
 worker, and logging code don't change.
 
 ## Decisions I made, and what they cost
@@ -86,7 +97,7 @@ needed fan-out to multiple consumers or topic-based routing, BullMQ would
 start fighting me and RabbitMQ would be the better tool.
 
 **202 Accepted instead of waiting for delivery.** Callers don't find out from
-the HTTP response whether their message actually reached Slack — they get a
+the HTTP response whether their message actually reached Slack. They get a
 message ID and have to check the log. That's a real downside for anyone who
 wants immediate confirmation. I took it because the alternative is the API's
 availability being tied to Slack's and Telegram's, which seemed worse.
@@ -183,7 +194,7 @@ curl -X POST http://localhost:3000/api/v1/notifications/send \
 - **No rate limiting per tenant.** A single tenant can currently flood the
   queue, and nothing stops the worker from hammering a provider hard enough
   to get the webhook banned.
-- **Email isn't implemented** — the strategy interface is there, the SMTP
+- **Email isn't implemented.** The strategy interface is there, the SMTP
   adapter isn't.
 - **No automated tests.** The curl commands above are how I've been checking
   it, which isn't good enough.
@@ -197,8 +208,14 @@ Docker Compose
 
 ## Author
 
-Built by Osazuwa Matthew Ogbebor — [@osazuwamatthewogbebor](https://github.com/osazuwamatthewogbebor)
+<p>
+  <a href="https://github.com/osazuwamatthewogbebor">
+    <img src="https://img.shields.io/badge/GitHub-181717?style=flat-square&logo=github&logoColor=white" />
+  </a>
+</p>
+
+Built by Osazuwa Matthew Ogbebor: [@osazuwamatthewogbebor](https://github.com/osazuwamatthewogbebor)
 
 ## License
 
-MIT — see `LICENSE`.
+MIT. See `LICENSE`.
